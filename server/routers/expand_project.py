@@ -8,7 +8,6 @@ Allows adding multiple features to existing projects via natural language.
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +22,7 @@ from ..services.expand_chat_session import (
     list_expand_sessions,
     remove_expand_session,
 )
+from ..utils.validation import validate_project_name
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,6 @@ def _get_project_path(project_name: str) -> Path:
     return get_project_path(project_name)
 
 
-def validate_project_name(name: str) -> bool:
-    """Validate project name to prevent path traversal."""
-    return bool(re.match(r'^[a-zA-Z0-9_-]{1,50}$', name))
 
 
 # ============================================================================
@@ -70,8 +67,7 @@ async def list_expand_sessions_endpoint():
 @router.get("/sessions/{project_name}", response_model=ExpandSessionStatus)
 async def get_expand_session_status(project_name: str):
     """Get status of an expansion session."""
-    if not validate_project_name(project_name):
-        raise HTTPException(status_code=400, detail="Invalid project name")
+    project_name = validate_project_name(project_name)
 
     session = get_expand_session(project_name)
     if not session:
@@ -89,8 +85,7 @@ async def get_expand_session_status(project_name: str):
 @router.delete("/sessions/{project_name}")
 async def cancel_expand_session(project_name: str):
     """Cancel and remove an expansion session."""
-    if not validate_project_name(project_name):
-        raise HTTPException(status_code=400, detail="Invalid project name")
+    project_name = validate_project_name(project_name)
 
     session = get_expand_session(project_name)
     if not session:
@@ -124,7 +119,9 @@ async def expand_project_websocket(websocket: WebSocket, project_name: str):
     - {"type": "error", "content": "..."} - Error message
     - {"type": "pong"} - Keep-alive pong
     """
-    if not validate_project_name(project_name):
+    try:
+        project_name = validate_project_name(project_name)
+    except HTTPException:
         await websocket.close(code=4000, reason="Invalid project name")
         return
 

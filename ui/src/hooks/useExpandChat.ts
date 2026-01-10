@@ -54,6 +54,7 @@ export function useExpandChat({
   const pingIntervalRef = useRef<number | null>(null)
   const reconnectTimeoutRef = useRef<number | null>(null)
   const isCompleteRef = useRef(false)
+  const manuallyDisconnectedRef = useRef(false)
 
   // Keep isCompleteRef in sync with isComplete state
   useEffect(() => {
@@ -76,6 +77,10 @@ export function useExpandChat({
   }, [])
 
   const connect = useCallback(() => {
+    // Don't reconnect if manually disconnected
+    if (manuallyDisconnectedRef.current) {
+      return
+    }
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return
     }
@@ -92,6 +97,7 @@ export function useExpandChat({
     ws.onopen = () => {
       setConnectionStatus('connected')
       reconnectAttempts.current = 0
+      manuallyDisconnectedRef.current = false
 
       // Start ping interval to keep connection alive
       pingIntervalRef.current = window.setInterval(() => {
@@ -109,7 +115,11 @@ export function useExpandChat({
       }
 
       // Attempt reconnection if not intentionally closed
-      if (reconnectAttempts.current < maxReconnectAttempts && !isCompleteRef.current) {
+      if (
+        !manuallyDisconnectedRef.current &&
+        reconnectAttempts.current < maxReconnectAttempts &&
+        !isCompleteRef.current
+      ) {
         reconnectAttempts.current++
         const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 10000)
         reconnectTimeoutRef.current = window.setTimeout(connect, delay)
@@ -244,18 +254,25 @@ export function useExpandChat({
   const start = useCallback(() => {
     connect()
 
-    // Wait for connection then send start message
+    // Wait for connection then send start message (with timeout to prevent infinite loop)
+    let attempts = 0
+    const maxAttempts = 50 // 5 seconds max (50 * 100ms)
     const checkAndSend = () => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         setIsLoading(true)
         wsRef.current.send(JSON.stringify({ type: 'start' }))
       } else if (wsRef.current?.readyState === WebSocket.CONNECTING) {
-        setTimeout(checkAndSend, 100)
+        if (attempts++ < maxAttempts) {
+          setTimeout(checkAndSend, 100)
+        } else {
+          onError?.('Connection timeout')
+          setIsLoading(false)
+        }
       }
     }
 
     setTimeout(checkAndSend, 100)
-  }, [connect])
+  }, [connect, onError])
 
   const sendMessage = useCallback((content: string, attachments?: ImageAttachment[]) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -297,6 +314,7 @@ export function useExpandChat({
   }, [onError])
 
   const disconnect = useCallback(() => {
+    manuallyDisconnectedRef.current = true
     reconnectAttempts.current = maxReconnectAttempts // Prevent reconnection
     if (pingIntervalRef.current) {
       clearInterval(pingIntervalRef.current)

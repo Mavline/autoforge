@@ -6,11 +6,13 @@ Manages interactive project expansion conversation with Claude.
 Uses the expand-project.md skill to help users add features to existing projects.
 """
 
+import asyncio
 import json
 import logging
 import re
 import shutil
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Optional
@@ -68,6 +70,7 @@ class ExpandChatSession:
         self.features_created: int = 0
         self.created_feature_ids: list[int] = []
         self._settings_file: Optional[Path] = None
+        self._query_lock = asyncio.Lock()
 
     async def close(self) -> None:
         """Clean up resources and close the Claude client."""
@@ -117,7 +120,16 @@ class ExpandChatSession:
         except UnicodeDecodeError:
             skill_content = skill_path.read_text(encoding="utf-8", errors="replace")
 
-        # Create security settings file
+        # Find and validate Claude CLI before creating temp files
+        system_cli = shutil.which("claude")
+        if not system_cli:
+            yield {
+                "type": "error",
+                "content": "Claude CLI not found. Please install Claude Code."
+            }
+            return
+
+        # Create temporary security settings file (unique per session to avoid conflicts)
         security_settings = {
             "sandbox": {"enabled": True},
             "permissions": {
@@ -128,23 +140,16 @@ class ExpandChatSession:
                 ],
             },
         }
-        settings_file = self.project_dir / ".claude_settings.json"
+        settings_file = self.project_dir / f".claude_settings.expand.{uuid.uuid4().hex}.json"
         self._settings_file = settings_file
-        with open(settings_file, "w") as f:
+        with open(settings_file, "w", encoding="utf-8") as f:
             json.dump(security_settings, f, indent=2)
 
         # Replace $ARGUMENTS with absolute project path
         project_path = str(self.project_dir.resolve())
         system_prompt = skill_content.replace("$ARGUMENTS", project_path)
 
-        # Find and validate Claude CLI
-        system_cli = shutil.which("claude")
-        if not system_cli:
-            yield {
-                "type": "error",
-                "content": "Claude CLI not found. Please install Claude Code."
-            }
-            return
+        # Create Claude SDK client
         try:
             self.client = ClaudeSDKClient(
                 options=ClaudeAgentOptions(
@@ -167,20 +172,21 @@ class ExpandChatSession:
             logger.exception("Failed to create Claude client")
             yield {
                 "type": "error",
-                "content": f"Failed to initialize Claude: {str(e)}"
+                "content": "Failed to initialize Claude"
             }
             return
 
         # Start the conversation
         try:
-            async for chunk in self._query_claude("Begin the project expansion process."):
-                yield chunk
+            async with self._query_lock:
+                async for chunk in self._query_claude("Begin the project expansion process."):
+                    yield chunk
             yield {"type": "response_done"}
         except Exception as e:
             logger.exception("Failed to start expand chat")
             yield {
                 "type": "error",
-                "content": f"Failed to start conversation: {str(e)}"
+                "content": "Failed to start conversation"
             }
 
     async def send_message(
@@ -218,14 +224,16 @@ class ExpandChatSession:
         })
 
         try:
-            async for chunk in self._query_claude(user_message, attachments):
-                yield chunk
+            # Use lock to prevent concurrent queries from corrupting the response stream
+            async with self._query_lock:
+                async for chunk in self._query_claude(user_message, attachments):
+                    yield chunk
             yield {"type": "response_done"}
         except Exception as e:
             logger.exception("Error during Claude query")
             yield {
                 "type": "error",
-                "content": f"Error: {str(e)}"
+                "content": "Error while processing message"
             }
 
     async def _query_claude(
@@ -340,6 +348,10 @@ class ExpandChatSession:
 
         Returns:
             List of created feature dictionaries with IDs
+
+        Note:
+            Uses flush() to get IDs immediately without re-querying by priority range,
+            which could pick up rows from concurrent writers.
         """
         # Import database classes
         import sys
@@ -358,7 +370,7 @@ class ExpandChatSession:
             max_priority_feature = session.query(Feature).order_by(Feature.priority.desc()).first()
             current_priority = (max_priority_feature.priority + 1) if max_priority_feature else 1
 
-            created_features = []
+            created_rows: list = []
 
             for f in features:
                 db_feature = Feature(
@@ -370,24 +382,28 @@ class ExpandChatSession:
                     passes=False,
                 )
                 session.add(db_feature)
+                created_rows.append(db_feature)
                 current_priority += 1
 
-            session.commit()
+            # Flush to get IDs without relying on priority range query
+            session.flush()
 
-            # Re-query to get the created features with IDs
-            start_priority = current_priority - len(features)
-            for db_feature in session.query(Feature).filter(
-                Feature.priority >= start_priority,
-                Feature.priority < current_priority
-            ).order_by(Feature.priority).all():
-                created_features.append({
+            # Build result from the flushed objects (IDs are now populated)
+            created_features = [
+                {
                     "id": db_feature.id,
                     "name": db_feature.name,
                     "category": db_feature.category,
-                })
+                }
+                for db_feature in created_rows
+            ]
 
+            session.commit()
             return created_features
 
+        except Exception:
+            session.rollback()
+            raise
         finally:
             session.close()
 

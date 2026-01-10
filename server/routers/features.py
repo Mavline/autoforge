@@ -6,7 +6,6 @@ API endpoints for feature/test case management.
 """
 
 import logging
-import re
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -19,6 +18,7 @@ from ..schemas import (
     FeatureListResponse,
     FeatureResponse,
 )
+from ..utils.validation import validate_project_name
 
 # Lazy imports to avoid circular dependencies
 _create_database = None
@@ -54,16 +54,6 @@ def _get_db_classes():
 
 
 router = APIRouter(prefix="/api/projects/{project_name}/features", tags=["features"])
-
-
-def validate_project_name(name: str) -> str:
-    """Validate and sanitize project name to prevent path traversal."""
-    if not re.match(r'^[a-zA-Z0-9_-]{1,50}$', name):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid project name"
-        )
-    return name
 
 
 @contextmanager

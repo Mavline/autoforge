@@ -34,6 +34,9 @@ export function ExpandProjectChat({
   const inputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Memoize error handler to keep hook dependencies stable
+  const handleError = useCallback((err: string) => setError(err), [])
+
   const {
     messages,
     isLoading,
@@ -46,7 +49,7 @@ export function ExpandProjectChat({
   } = useExpandChat({
     projectName,
     onComplete,
-    onError: (err) => setError(err),
+    onError: handleError,
   })
 
   // Start the chat session when component mounts
